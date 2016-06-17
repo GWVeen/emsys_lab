@@ -12,7 +12,7 @@ int tilt_pwm_reg = 2;
 int pan_pwm_reg = 4;
 
 //control loop parameters
-double freq = 50.0;
+double freq = 2.0;
 
 //tilt parameters
 double tilt_corrGain = 0.0;
@@ -64,12 +64,12 @@ int main(int argc, char* argv[]){
 	printf("Opened gpmc_fpga\n");
 	//time
 	double sampletime; //in seconds
-	unsigned long long time_current, time_prev; //in micro seconds
+	unsigned long long time_current, time_prev; // nano seconds
 	struct timespec tp;
 	clock_gettime(CLOCK_REALTIME, &tp);
-	time_prev = 1000000000*tp.tv_sec + tp.tv_nsec;
+	time_prev = 1000000000.0*tp.tv_sec + tp.tv_nsec;
 	//control
-	int count = -10;
+	int count = -20;
 	double tilt_setpoint = 0.0;
 	double pan_setpoint = 0.0;
 	//pwm
@@ -83,19 +83,21 @@ int main(int argc, char* argv[]){
 		//update sampletime
 		while(sampletime < 1/freq){ //wait until its time to run again as defined by freq
 			clock_gettime(CLOCK_REALTIME, &tp);
-			time_current = 1000000000*tp.tv_sec + tp.tv_nsec;
+			time_current = 1000000000.0*tp.tv_sec + tp.tv_nsec;
 			sampletime = ((double)(time_current-time_prev))/1000000000.0;
 		}
-		time_prev = time_current;
 		//UPDATE target position
 		if(count <0){
 			tilt_setpoint = tilt_setpoint-0.01;
 			pan_setpoint = pan_setpoint-0.01;
-		}else if(count <10){
+		}else if(count <20){
 			tilt_setpoint = tilt_setpoint+0.01;
 			pan_setpoint = pan_setpoint+0.01;
-		}else count = -10;
-		
+		}else{
+			count = -20;
+			tilt_setpoint = 0.0;
+			pan_setpoint = 0.0;
+		}
 		//UPDATE pwm
 		tilt_position = (double)getGPMCValue(fd, tilt_position_reg)/318.41;
 		pan_position = (double)getGPMCValue(fd, pan_position_reg)/318.41;
@@ -104,6 +106,9 @@ int main(int argc, char* argv[]){
 		setGPMCValue(fd, tilt_pwm, tilt_pwm_reg);
 		setGPMCValue(fd, pan_pwm, pan_pwm_reg);
 		printf("sampletime: %f tilt_setpoint: %f tilt_position: %f tilt_pwm: %i\n", sampletime, tilt_setpoint, tilt_position, tilt_pwm);
+		//update sampletime
+		sampletime = 0;
+		time_prev = time_current;
 	}
 	
 	printf("Exiting...\n");
