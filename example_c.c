@@ -43,8 +43,8 @@ double pan_error_prev = 0.0;
 double pan_error = 0.0;
 
 //prototypes
-double tilt(double sampletime, int input, int position);
-double pan(double sampletime, int input, int position);
+double tilt(double sampletime, double input, double position);
+double pan(double sampletime, double input, double position);
 
 int main(int argc, char* argv[]){
 	int fd; // File descriptor.
@@ -53,7 +53,7 @@ int main(int argc, char* argv[]){
 		return 1;
 	}
 
-	printf("Gerard & Henk yoghurt-demo\n");
+	printf("Gerard & Henk's yoghurt-demo\n");
 	// open connection to device.
 	printf("Opening gpmc_fpga...\n");
 	fd = open(argv[1], 0);
@@ -61,6 +61,7 @@ int main(int argc, char* argv[]){
 		printf("Error, could not open device: %s.\n", argv[1]);
 		return 1;
 	}
+	printf("Opened gpmc_fpga\n");
 	//time
 	double sampletime; //in seconds
 	unsigned long long time_current, time_prev; //in micro seconds
@@ -68,12 +69,12 @@ int main(int argc, char* argv[]){
 	clock_gettime(CLOCK_REALTIME, &tp);
 	time_prev = 1000000000*tp.tv_sec + tp.tv_nsec;
 	//control
-	int count = -100;
-	double tilt_setpoint = 0;
-	double pan_setpoint = 0;
+	int count = -10;
+	double tilt_setpoint = 0.0;
+	double pan_setpoint = 0.0;
 	//pwm
-	int tilt_position;
-	int pan_position;
+	double tilt_position;
+	double pan_position;
 	int tilt_pwm;
 	int pan_pwm;
 	
@@ -82,7 +83,7 @@ int main(int argc, char* argv[]){
 		//update sampletime
 		while(sampletime < 1/freq){ //wait until its time to run again as defined by freq
 			clock_gettime(CLOCK_REALTIME, &tp);
-			time_current = 1000000000*tp.tv_sec + tp.tv_usec;
+			time_current = 1000000000*tp.tv_sec + tp.tv_nsec;
 			sampletime = ((double)(time_current-time_prev))/1000000000.0;
 		}
 		time_prev = time_current;
@@ -90,18 +91,19 @@ int main(int argc, char* argv[]){
 		if(count <0){
 			tilt_setpoint = tilt_setpoint-0.01;
 			pan_setpoint = pan_setpoint-0.01;
-		}else if(count <100){
+		}else if(count <10){
 			tilt_setpoint = tilt_setpoint+0.01;
 			pan_setpoint = pan_setpoint+0.01;
-		}else count = -100;
+		}else count = -10;
 		
 		//UPDATE pwm
-		tilt_position = getGPMCValue(fd, tilt_position_reg);
-		pan_position = getGPMCValue(fd, pan_position_reg);
+		tilt_position = (double)getGPMCValue(fd, tilt_position_reg)/318.41;
+		pan_position = (double)getGPMCValue(fd, pan_position_reg)/318.41;
 		tilt_pwm = (int)(100*tilt(sampletime, tilt_setpoint,tilt_position));
 		pan_pwm = (int)(100*pan(sampletime, pan_setpoint,pan_position));
 		setGPMCValue(fd, tilt_pwm, tilt_pwm_reg);
 		setGPMCValue(fd, pan_pwm, pan_pwm_reg);
+		printf("sampletime: %f tilt_setpoint: %f tilt_position: %f tilt_pwm: %i\n", sampletime, tilt_setpoint, tilt_position, tilt_pwm);
 	}
 	
 	printf("Exiting...\n");
@@ -116,7 +118,7 @@ FUCNTION: tilt
 DESC: outputs speed and direction from input data.
 input and position are angles in radians
 */
-double tilt(double sampletime, int input, int position){
+double tilt(double sampletime, double input, double position){
 	double factor = 1.0/(sampletime+tilt_tauD+tilt_beta);
 	double error = input - position;
 	double uD = factor*(((tilt_tauD*tilt_uD_prev)*tilt_beta + 
@@ -138,7 +140,7 @@ FUCNTION: pan
 DESC: outputs speed and direction from input data.
 input and position are angles in radians
 */
-double pan(double sampletime, int input, int position){
+double pan(double sampletime, double input, double position){
 	double factor = 1.0/(sampletime+pan_tauD+pan_beta);
 	double error = input - position;
 	double uD = factor*(((pan_tauD*pan_uD_prev)*pan_beta + 
