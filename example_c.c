@@ -2,8 +2,11 @@
 #include "gpmc_driver_c.h"
 
 #include <time.h>
-#include <fcntl.h>      // open()
-#include <unistd.h>     // close()
+#include <fcntl.h>     // open()
+#include <unistd.h>    // close()
+#include <gst/gst.h>
+#include <glib.h>
+#include <gst/app/gstappsink.h>
 
 //registers
 int tilt_position_reg = 0;
@@ -42,80 +45,255 @@ double pan_uD_prev = 0.0;
 double pan_error_prev = 0.0;
 double pan_error = 0.0;
 
+//LOOP VARIABLES
+int fd; // File descriptor.
+char gpmc[] = "/dev/gpmc_fpga";
+char webcam[] = "/dev/video0";
+	//time
+double sampletime; //in seconds
+unsigned long long time_current, time_prev; // nano seconds
+struct timespec tp;
+	//control
+double tilt_setpoint = 0.0;
+double pan_setpoint = 0.0;
+	//pwm
+double tilt_position;
+double pan_position;
+int tilt_pwm;
+int pan_pwm;
+
 //prototypes
+static void new_sample (GstAppSink *sink, GstElement *element);
+static gboolean link_elements_with_filter (GstElement *element1, GstElement *element2);
+static gboolean bus_call (GstBus *bus, GstMessage *msg, gpointer data);
+static void on_pad_added (GstElement *element, GstPad *pad, gpointer data);
 double tilt(double sampletime, double input, double position);
 double pan(double sampletime, double input, double position);
 
-int main(int argc, char* argv[]){
-	int fd; // File descriptor.
-	if (2 != argc){
-		printf("Usage: %s <device_name>\n", argv[0]);
-		return 1;
+int main (int   argc, char *argv[]){
+	GMainLoop *loop;
+	GstElement *pipeline, *source, *converter, *sink;
+	GstBus *bus;
+	guint bus_watch_id;
+
+	/* Initialisation */
+
+	gst_init (&argc, webcam);
+	loop = g_main_loop_new (NULL, FALSE);
+
+	/* Create gstreamer elements */
+	pipeline 	= gst_pipeline_new ("video-player");
+	source   	= gst_element_factory_make ("v4l2src",      	"video-source");
+	converter	= gst_element_factory_make ("videoconvert",	"video-converter");
+	sink     	= gst_element_factory_make ("appsink", 	"video-output");
+
+	if (!pipeline || !source || !converter || !sink) {
+		g_printerr ("One element could not be created. Exiting.\n");
+		return -1;
 	}
 
-	printf("Gerard & Henk's yoghurt-demo\n");
-	// open connection to device.
-	printf("Opening gpmc_fpga...\n");
-	fd = open(argv[1], 0);
+	/* Set up the pipeline */
+	/* we set the device to the source element */
+	g_object_set (G_OBJECT (source), "device", "/dev/video0", NULL);
+
+	/* we add a message handler */
+	bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
+	bus_watch_id = gst_bus_add_watch (bus, bus_call, loop);
+	gst_object_unref (bus);
+
+	/* we add all elements into the pipeline */
+	/* source | converter | sink */
+	gst_bin_add_many (GST_BIN (pipeline),
+					source, converter, sink, NULL);
+
+	/* link the elements together */
+	/* file-source (caps)-> converter -> sink */
+	if (link_elements_with_filter (source, converter)){
+		gst_element_link_many (converter, sink, NULL);
+	}
+	else{
+		g_warning ("Shit!");
+	}
+
+	/* configure appsink*/
+	GstCaps *caps;
+	caps = gst_caps_new_simple ("video/x-raw",
+		"format", G_TYPE_STRING, "YUY2",     
+		"width", G_TYPE_INT, 160,
+		"height", G_TYPE_INT, 120,
+		"framerate", GST_TYPE_FRACTION, 30, 1,
+	NULL);
+
+	// g_object_set (sink, "emit-signals", TRUE, "caps", caps, NULL);//done!
+	g_object_set (sink, "emit-signals", TRUE, "caps", caps, NULL);//done!
+	g_signal_connect (sink, "new-sample", G_CALLBACK (new_sample), sink);
+	gst_caps_unref (caps);
+	//g_free (audio_caps_text);
+
+	/* Set the pipeline to "playing" state*/
+	g_print ("WEBCAM STARTING\n");
+	gst_element_set_state (pipeline, GST_STATE_PLAYING);
+
+	/* GPMC & DETECTION */
+	fd = open(gpmc, 0);
 	if (0 > fd){
-		printf("Error, could not open device: %s.\n", argv[1]);
+		printf("Error, could not open device: %s.\n", gpmc);
 		return 1;
 	}
-	printf("Opened gpmc_fpga\n");
-	//time
-	double sampletime; //in seconds
-	unsigned long long time_current, time_prev; // nano seconds
-	struct timespec tp;
 	clock_gettime(CLOCK_REALTIME, &tp);
 	time_prev = 1000000000.0*tp.tv_sec + tp.tv_nsec;
-	//control
-	int count = -20;
-	double tilt_setpoint = 0.0;
-	double pan_setpoint = 0.0;
-	//pwm
-	double tilt_position;
-	double pan_position;
-	int tilt_pwm;
-	int pan_pwm;
-	
-	
-	while(1){
-		//update sampletime
-		while(sampletime < 1/freq){ //wait until its time to run again as defined by freq
-			clock_gettime(CLOCK_REALTIME, &tp);
-			time_current = 1000000000.0*tp.tv_sec + tp.tv_nsec;
-			sampletime = ((double)(time_current-time_prev))/1000000000.0;
-		}
-		//UPDATE target position
-		if(count <0){
-			tilt_setpoint = tilt_setpoint-0.01;
-			pan_setpoint = pan_setpoint-0.01;
-		}else if(count <20){
-			tilt_setpoint = tilt_setpoint+0.01;
-			pan_setpoint = pan_setpoint+0.01;
-		}else{
-			count = -20;
-			tilt_setpoint = 0.0;
-			pan_setpoint = 0.0;
-		}
-		//UPDATE pwm
-		tilt_position = (double)getGPMCValue(fd, tilt_position_reg)/318.41;
-		pan_position = (double)getGPMCValue(fd, pan_position_reg)/318.41;
-		tilt_pwm = (int)(100*tilt(sampletime, tilt_setpoint,tilt_position));
-		pan_pwm = (int)(100*pan(sampletime, pan_setpoint,pan_position));
-		setGPMCValue(fd, tilt_pwm, tilt_pwm_reg);
-		setGPMCValue(fd, pan_pwm, pan_pwm_reg);
-		printf("sampletime: %f tilt_setpoint: %f tilt_position: %f tilt_pwm: %i\n", sampletime, tilt_setpoint, tilt_position, tilt_pwm);
-		//update sampletime
-		sampletime = 0;
-		time_prev = time_current;
-	}
-	
-	printf("Exiting...\n");
-	// close connection to free resources.
+	/* Iterate */
+	g_print ("Running...\n");
+	g_main_loop_run (loop);
+
+	/* Out of the main loop, clean up nicely */
 	close(fd);
-	
-  return 0;
+	g_print ("Returned, stopping playback\n");
+	gst_element_set_state (pipeline, GST_STATE_NULL);
+	g_print ("Deleting pipeline\n");
+	gst_object_unref (GST_OBJECT (pipeline));
+	g_source_remove (bus_watch_id);
+	g_main_loop_unref (loop);
+	return 0;
+}
+
+static void new_sample (GstAppSink *sink, GstElement *element){
+	/* Retrieve the buffer */
+	GstSample *sample = NULL;
+	sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+	if (sample) {
+		/* UPDATE SETPOINT*/
+		//VARIABLES
+		g_print ("*\n"); 
+		struct yuyv{
+			unsigned char y1;
+			unsigned char u;
+			unsigned char y2;
+			unsigned char v;
+		}yuyv;
+		int w = 160;
+		int h = 120;
+		int pixels_per_yuyv = 2;
+		int bytes_per_pixel = 2;
+		int bytes_per_yuyv = sizeof(yuyv);
+		int yuyvs_per_image = (h*w*bytes_per_pixel)/bytes_per_yuyv;
+		//GET DATA
+		GstBuffer *buffer = gst_sample_get_buffer(sample);
+		GstMapInfo map;
+		gst_buffer_map(buffer, &map, GST_MAP_READ);
+		struct yuyv yuyv_image[yuyvs_per_image] = map.data;
+		//DO MEASUREMENT
+		double fov = 3.1415/2.0;// 90 degrees// in radians!! field of view
+		double x_avg = 0;
+		double y_avg = 0;
+		int number_of_accepted_pixels = 0;
+		int i = 0;
+		for(i=0;i<yuyvs_per_image;i++){
+			if(yuyv_image[i].u < 120 && yuyv_image[i].v <120){
+				//CALCULATE XY POSITION BLOB
+				x_avg += (int)(i % (w/pixels_per_yuyv));
+				y_avg += (int)(i / (w/pixels_per_yuyv));
+				number_of_accepted_pixels++;
+				//debug printf("x: %i\n", (i) % (w/pixels_per_yuyv));
+			}
+		}
+		x_avg = x_avg/number_of_accepted_pixels;
+		y_avg = y_avg/number_of_accepted_pixels;
+		pan_setpoint = (x_avg-w/2.0)*(fov/w);
+		tilt_setpoint = (y_avg-h/2.0)*(fov/h);
+		//unmap
+		gst_buffer_unmap(buffer, map);
+	}else{
+		g_print ("No sample\n");
+	}
+	gst_sample_unref(sample);
+	g_print("get emit signals %d",gst_app_sink_get_emit_signals(GST_APP_SINK(sink)));
+
+	/* UPDATE CONTROL SYSTEM*/
+	//update sampletime
+	clock_gettime(CLOCK_REALTIME, &tp);
+	time_current = 1000000000.0*tp.tv_sec + tp.tv_nsec;
+	sampletime = ((double)(time_current-time_prev))/1000000000.0;
+	//update pwm
+	tilt_position = (double)getGPMCValue(fd, tilt_position_reg)/318.41;
+	pan_position = (double)getGPMCValue(fd, pan_position_reg)/318.41;
+	tilt_pwm = (int)(100*tilt(sampletime, tilt_setpoint,tilt_position));
+	pan_pwm = (int)(100*pan(sampletime, pan_setpoint,pan_position));
+	setGPMCValue(fd, tilt_pwm, tilt_pwm_reg);
+	setGPMCValue(fd, pan_pwm, pan_pwm_reg);
+	//debug:printf("sampletime: %f tilt_setpoint: %f tilt_position: %f tilt_pwm: %i\n", sampletime, tilt_setpoint, tilt_position, tilt_pwm);
+	//update time variables
+	time_prev = time_current;
+}
+
+static gboolean link_elements_with_filter (GstElement *element1, GstElement *element2){
+   gboolean link_ok;
+   GstCaps *caps;
+   caps = gst_caps_new_simple ("video/x-raw",
+	"format", G_TYPE_STRING, "YUY2",     
+	"width", G_TYPE_INT, 160,
+	"height", G_TYPE_INT, 120,
+	"framerate", GST_TYPE_FRACTION, 30, 1,
+	NULL);
+
+   link_ok = gst_element_link_filtered (element1, element2, caps);
+   gst_caps_unref (caps);
+
+   if (!link_ok){
+     g_warning ("Failed to link element1 and element2!");
+   }
+
+   return link_ok;
+}
+
+static gboolean bus_call (GstBus     *bus,
+						GstMessage *msg,
+						gpointer    data){
+  GMainLoop *loop = (GMainLoop *) data;
+  switch (GST_MESSAGE_TYPE (msg)) {
+
+    case GST_MESSAGE_EOS:
+      g_print ("End of stream\n");
+      g_main_loop_quit (loop);
+      break;
+
+    case GST_MESSAGE_ERROR: {
+      gchar  *debug;
+      GError *error;
+
+      gst_message_parse_error (msg, &error, &debug);
+      g_free (debug);
+
+      g_printerr ("Error: %s\n", error->message);
+      g_error_free (error);
+
+      g_main_loop_quit (loop);
+      break;
+    }
+    default:
+      break;
+  }
+
+  return TRUE;
+}
+
+
+static void
+on_pad_added (GstElement *element,
+              GstPad     *pad,
+              gpointer    data)
+{
+  GstPad *sinkpad;
+  GstElement *decoder = (GstElement *) data;
+
+  /* We can now link this pad with the vorbis-decoder sink pad */
+  g_print ("Dynamic pad created, linking demuxer/decoder\n");
+
+  sinkpad = gst_element_get_static_pad (decoder, "sink");
+
+  gst_pad_link (pad, sinkpad);
+
+  gst_object_unref (sinkpad);
 }
 
 /*
