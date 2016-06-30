@@ -1,6 +1,6 @@
 #include "stdio.h"
 #include "gpmc_driver_c.h"
-
+#include <string.h>
 #include <time.h>
 #include <fcntl.h>     // open()
 #include <unistd.h>    // close()
@@ -9,10 +9,10 @@
 #include <gst/app/gstappsink.h>
 
 //registers
-int tilt_position_reg = 0;
-int pan_position_reg = 1;
-int tilt_pwm_reg = 2;
-int pan_pwm_reg = 4;
+int tilt_position_reg = 6;
+int pan_position_reg = 7;
+int tilt_pwm_reg = 8;
+int pan_pwm_reg = 9;
 
 //control loop parameters
 double freq = 2.0;
@@ -57,8 +57,8 @@ struct timespec tp;
 double tilt_setpoint = 0.0;
 double pan_setpoint = 0.0;
 	//pwm
-double tilt_position;
-double pan_position;
+double tilt_position = 0.0;
+double pan_position = 0.0;
 int tilt_pwm;
 int pan_pwm;
 
@@ -66,7 +66,6 @@ int pan_pwm;
 static void new_sample (GstAppSink *sink, GstElement *element);
 static gboolean link_elements_with_filter (GstElement *element1, GstElement *element2);
 static gboolean bus_call (GstBus *bus, GstMessage *msg, gpointer data);
-static void on_pad_added (GstElement *element, GstPad *pad, gpointer data);
 double tilt(double sampletime, double input, double position);
 double pan(double sampletime, double input, double position);
 
@@ -78,7 +77,7 @@ int main (int   argc, char *argv[]){
 
 	/* Initialisation */
 
-	gst_init (&argc, webcam);
+	gst_init (&argc, &argv);
 	loop = g_main_loop_new (NULL, FALSE);
 
 	/* Create gstreamer elements */
@@ -177,11 +176,12 @@ static void new_sample (GstAppSink *sink, GstElement *element){
 		int bytes_per_pixel = 2;
 		int bytes_per_yuyv = sizeof(yuyv);
 		int yuyvs_per_image = (h*w*bytes_per_pixel)/bytes_per_yuyv;
+		struct yuyv yuyv_image[yuyvs_per_image];
 		//GET DATA
 		GstBuffer *buffer = gst_sample_get_buffer(sample);
 		GstMapInfo map;
 		gst_buffer_map(buffer, &map, GST_MAP_READ);
-		struct yuyv yuyv_image[yuyvs_per_image] = map.data;
+		memcpy(yuyv_image, map.data, sizeof(yuyv)*yuyvs_per_image);
 		//DO MEASUREMENT
 		double fov = 3.1415/2.0;// 90 degrees// in radians!! field of view
 		double x_avg = 0;
@@ -202,7 +202,7 @@ static void new_sample (GstAppSink *sink, GstElement *element){
 		pan_setpoint = (x_avg-w/2.0)*(fov/w);
 		tilt_setpoint = (y_avg-h/2.0)*(fov/h);
 		//unmap
-		gst_buffer_unmap(buffer, map);
+		gst_buffer_unmap(buffer, &map);
 	}else{
 		g_print ("No sample\n");
 	}
@@ -215,13 +215,13 @@ static void new_sample (GstAppSink *sink, GstElement *element){
 	time_current = 1000000000.0*tp.tv_sec + tp.tv_nsec;
 	sampletime = ((double)(time_current-time_prev))/1000000000.0;
 	//update pwm
-	tilt_position = (double)getGPMCValue(fd, tilt_position_reg)/318.41;
-	pan_position = (double)getGPMCValue(fd, pan_position_reg)/318.41;
+	//tilt_position = (double)getGPMCValue(fd, tilt_position_reg)/318.41;
+	//pan_position = (double)getGPMCValue(fd, pan_position_reg)/318.41;
 	tilt_pwm = (int)(100*tilt(sampletime, tilt_setpoint,tilt_position));
 	pan_pwm = (int)(100*pan(sampletime, pan_setpoint,pan_position));
 	setGPMCValue(fd, tilt_pwm, tilt_pwm_reg);
 	setGPMCValue(fd, pan_pwm, pan_pwm_reg);
-	//debug:printf("sampletime: %f tilt_setpoint: %f tilt_position: %f tilt_pwm: %i\n", sampletime, tilt_setpoint, tilt_position, tilt_pwm);
+	//debug:printf("sampletime: %f tilt_setpoint: %f tilt_position: %f tilt_pwm: %i\n", 		sampletime, tilt_setpoint, tilt_position, tilt_pwm);
 	//update time variables
 	time_prev = time_current;
 }
@@ -275,25 +275,6 @@ static gboolean bus_call (GstBus     *bus,
   }
 
   return TRUE;
-}
-
-
-static void
-on_pad_added (GstElement *element,
-              GstPad     *pad,
-              gpointer    data)
-{
-  GstPad *sinkpad;
-  GstElement *decoder = (GstElement *) data;
-
-  /* We can now link this pad with the vorbis-decoder sink pad */
-  g_print ("Dynamic pad created, linking demuxer/decoder\n");
-
-  sinkpad = gst_element_get_static_pad (decoder, "sink");
-
-  gst_pad_link (pad, sinkpad);
-
-  gst_object_unref (sinkpad);
 }
 
 /*
